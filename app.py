@@ -3,9 +3,28 @@ import requests
 import json
 import time
 import random
+import logging
+import os
+from datetime import datetime
 from PIL import Image
 import io
 import base64
+
+# Set up logging
+log_dir = "logs"
+os.makedirs(log_dir, exist_ok=True)
+log_filename = f"{log_dir}/svomo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_filename),
+        logging.StreamHandler()
+    ]
+)
+
+logger = logging.getLogger("svomo")
 
 # Set page configuration
 st.set_page_config(
@@ -271,6 +290,14 @@ def loading_animation():
 
 # Function to call Gemini API
 def call_gemini_api(prompt):
+    logger.info(f"Calling Gemini API with prompt length: {len(prompt)}")
+    
+    if not GEMINI_API_KEY:
+        error_msg = "Missing Gemini API key in secrets.toml"
+        logger.error(error_msg)
+        st.error(error_msg)
+        return None
+    
     headers = {
         "Content-Type": "application/json"
     }
@@ -287,26 +314,76 @@ def call_gemini_api(prompt):
         response = requests.post(url, headers=headers, json=data)
         response.raise_for_status()
         result = response.json()
+        
+        # Log success but not the full response content (could be large)
+        logger.info(f"Gemini API call successful, response length: {len(str(result))}")
+        
+        # Validate response structure
+        if "candidates" not in result or not result["candidates"]:
+            error_msg = "Gemini API returned empty candidates"
+            logger.error(error_msg)
+            st.error(error_msg)
+            return None
+            
+        if "content" not in result["candidates"][0] or "parts" not in result["candidates"][0]["content"]:
+            error_msg = "Unexpected Gemini API response structure"
+            logger.error(error_msg)
+            st.error(error_msg)
+            return None
+            
         return result["candidates"][0]["content"]["parts"][0]["text"]
+    except requests.exceptions.ConnectionError as e:
+        error_msg = f"Connection error calling Gemini API: {e}"
+        logger.error(error_msg)
+        st.error(error_msg)
+        return None
+    except requests.exceptions.RequestException as e:
+        error_msg = f"Request error calling Gemini API: {e}"
+        logger.error(error_msg)
+        st.error(error_msg)
+        return None
     except Exception as e:
-        st.error(f"Error calling Gemini API: {e}")
+        error_msg = f"Error calling Gemini API: {e}"
+        logger.error(error_msg)
+        st.error(error_msg)
         return None
 
 # Function to call TMDB API
 def call_tmdb_api(endpoint, params=None):
+    if not TMDB_API_KEY:
+        error_msg = "Missing TMDB API key in secrets.toml"
+        logger.error(error_msg)
+        st.error(error_msg)
+        return None
+    
     if params is None:
         params = {}
     
     params["api_key"] = TMDB_API_KEY
     
     url = f"{TMDB_BASE_URL}/{endpoint}"
+    logger.info(f"Calling TMDB API: {endpoint}")
     
     try:
         response = requests.get(url, params=params)
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        logger.info(f"TMDB API call successful: {endpoint}")
+        return data
+    except requests.exceptions.ConnectionError as e:
+        error_msg = f"Connection error calling TMDB API {endpoint}: {e}"
+        logger.error(error_msg)
+        st.error(error_msg)
+        return None
+    except requests.exceptions.HTTPError as e:
+        error_msg = f"HTTP error calling TMDB API {endpoint}: {e}"
+        logger.error(error_msg)
+        st.error(error_msg)
+        return None
     except Exception as e:
-        st.error(f"Error calling TMDB API: {e}")
+        error_msg = f"Error calling TMDB API {endpoint}: {e}"
+        logger.error(error_msg)
+        st.error(error_msg)
         return None
 
 # Function to get movie poster
@@ -323,6 +400,8 @@ def get_movie_poster(poster_path, size="w500"):
 
 # Function to generate questions based on user persona
 def generate_questions(persona):
+    logger.info(f"Generating questions for persona: {persona}")
+    
     prompt = f"""
     I need to create a series of questions for a movie recommendation system.
     The user has identified as: {persona}
@@ -348,26 +427,85 @@ def generate_questions(persona):
     ]
     
     Make the questions engaging and relevant to the {persona} persona.
+    Make sure your response is properly formatted and valid JSON.
     """
     
     response = call_gemini_api(prompt)
     if not response:
+        logger.error("Failed to get response from Gemini API for questions")
         return []
     
     try:
+        # Log the raw response for debugging
+        logger.info(f"Raw Gemini response length: {len(response)}")
+        
         # Extract JSON from the response (handling potential text before or after the JSON)
         json_start = response.find('[')
         json_end = response.rfind(']') + 1
+        
+        if json_start == -1 or json_end == 0:
+            error_msg = "Could not find JSON array in Gemini response"
+            logger.error(error_msg)
+            st.error(error_msg)
+            
+            # Fallback to default questions if JSON extraction fails
+            default_questions = [
+                {
+                    "question": "Are you watching alone or with someone?",
+                    "options": ["Alone", "With friends", "With family", "With a partner"]
+                },
+                {
+                    "question": "What's your current mood?",
+                    "options": ["Happy", "Relaxed", "Sad", "Excited", "Thoughtful"]
+                },
+                {
+                    "question": "Do you prefer older classics or newer releases?",
+                    "options": ["Classics", "Recent releases", "Both"]
+                },
+                {
+                    "question": "How much time do you have?",
+                    "options": ["Under 2 hours", "2-3 hours", "I have all day"]
+                },
+                {
+                    "question": "What kind of ending do you prefer?",
+                    "options": ["Happy", "Thought-provoking", "Doesn't matter"]
+                }
+            ]
+            
+            logger.info("Using default questions instead")
+            return default_questions
+        
         json_str = response[json_start:json_end]
+        logger.info(f"Extracted JSON string length: {len(json_str)}")
         
         questions = json.loads(json_str)
+        logger.info(f"Successfully parsed {len(questions)} questions")
+        
+        # Validate question format
+        for i, q in enumerate(questions):
+            if "question" not in q or "options" not in q:
+                logger.warning(f"Question {i} has invalid format")
+            elif not q["options"]:
+                logger.warning(f"Question {i} has no options")
+                q["options"] = ["Yes", "No"]  # Add default options
+        
         return questions
+    except json.JSONDecodeError as e:
+        error_msg = f"JSON decode error: {e}"
+        logger.error(error_msg)
+        logger.error(f"Failed JSON string: {response[:100]}...")
+        st.error(error_msg)
+        return []
     except Exception as e:
-        st.error(f"Error parsing questions: {e}")
+        error_msg = f"Error parsing questions: {e}"
+        logger.error(error_msg)
+        st.error(error_msg)
         return []
 
 # Function to get movie recommendations
 def get_recommendations(answers, persona):
+    logger.info(f"Getting recommendations for persona: {persona} with {len(answers)} answers")
+    
     # Construct a prompt for Gemini to generate movie recommendations
     answers_text = "\n".join([f"Q: {q['question']}\nA: {q['answer']}" for q in answers])
     
@@ -381,7 +519,7 @@ def get_recommendations(answers, persona):
     
     For each recommendation, provide:
     1. The exact title (be precise for API searching)
-    2. The release year
+    2. The release year (just the year as a 4-digit number)
     3. A brief explanation of why this is a good match
     
     Format your response as a JSON array:
@@ -393,33 +531,111 @@ def get_recommendations(answers, persona):
       }},
       ...
     ]
+    
+    Make sure your response is properly formatted JSON.
+    Only include these three fields (title, year, reason) for each recommendation.
+    Be very accurate with movie titles to ensure they can be found in the TMDB database.
     """
     
     response = call_gemini_api(prompt)
     if not response:
+        logger.error("Failed to get response from Gemini API for recommendations")
         return []
     
     try:
+        # Log the raw response for debugging
+        logger.info(f"Raw recommendation response length: {len(response)}")
+        
         # Extract JSON from the response
         json_start = response.find('[')
         json_end = response.rfind(']') + 1
+        
+        if json_start == -1 or json_end == 0:
+            error_msg = "Could not find JSON array in recommendation response"
+            logger.error(error_msg)
+            st.error(error_msg)
+            
+            # Fallback to default recommendations if JSON extraction fails
+            return [
+                {
+                    "title": "The Shawshank Redemption",
+                    "year": "1994",
+                    "reason": "A highly rated classic that appeals to most viewers"
+                },
+                {
+                    "title": "Inception",
+                    "year": "2010",
+                    "reason": "A mind-bending thriller with wide appeal"
+                },
+                {
+                    "title": "The Princess Bride",
+                    "year": "1987",
+                    "reason": "A beloved classic with humor, romance, and adventure"
+                }
+            ]
+        
         json_str = response[json_start:json_end]
+        logger.info(f"Extracted JSON string length: {len(json_str)}")
         
         recommendations = json.loads(json_str)
-        return recommendations
+        logger.info(f"Successfully parsed {len(recommendations)} recommendations")
+        
+        # Validate recommendation format
+        valid_recommendations = []
+        for i, rec in enumerate(recommendations):
+            if "title" not in rec:
+                logger.warning(f"Recommendation {i} missing title")
+            elif "year" not in rec:
+                logger.warning(f"Recommendation {i} missing year")
+                rec["year"] = ""  # Add empty year
+            elif "reason" not in rec:
+                logger.warning(f"Recommendation {i} missing reason")
+                rec["reason"] = "Recommended based on your preferences"  # Add default reason
+            
+            if "title" in rec:  # Only keep recommendations with at least a title
+                valid_recommendations.append(rec)
+        
+        return valid_recommendations
+    except json.JSONDecodeError as e:
+        error_msg = f"JSON decode error in recommendations: {e}"
+        logger.error(error_msg)
+        logger.error(f"Failed JSON string: {response[:100]}...")
+        st.error(error_msg)
+        return []
     except Exception as e:
-        st.error(f"Error parsing recommendations: {e}")
+        error_msg = f"Error parsing recommendations: {e}"
+        logger.error(error_msg)
+        st.error(error_msg)
         return []
 
 # Function to search for movies/shows in TMDB
 def search_tmdb(title, year=None):
+    logger.info(f"Searching TMDB for: '{title}', year: {year}")
+    
+    if not title:
+        logger.warning("Empty title provided to search_tmdb")
+        return None
+    
     params = {
         "query": title,
         "include_adult": "false",
     }
     
+    # Clean up year parameter
     if year:
-        params["year"] = year
+        try:
+            # Extract just the year if it's in a date format
+            if len(year) > 4 and '-' in year:
+                year = year.split('-')[0]
+            
+            # Make sure it's a 4-digit year
+            if len(year) >= 4:
+                year = year[:4]
+                
+            params["year"] = year
+            logger.info(f"Using year parameter: {year}")
+        except Exception as e:
+            logger.warning(f"Error processing year parameter: {e}")
     
     # First try searching for movies
     movie_results = call_tmdb_api("search/movie", params)
@@ -429,21 +645,52 @@ def search_tmdb(title, year=None):
     
     results = []
     
+    # Process movie results
     if movie_results and "results" in movie_results:
+        logger.info(f"Found {len(movie_results['results'])} movie results")
         for movie in movie_results["results"][:3]:  # Take top 3 results
             movie["media_type"] = "movie"
             results.append(movie)
+    else:
+        logger.warning("No movie results found")
     
+    # Process TV results
     if tv_results and "results" in tv_results:
+        logger.info(f"Found {len(tv_results['results'])} TV results")
         for show in tv_results["results"][:3]:  # Take top 3 results
             show["media_type"] = "tv"
             results.append(show)
+    else:
+        logger.warning("No TV results found")
     
     # Sort by popularity and take top result
     if results:
         results.sort(key=lambda x: x.get("popularity", 0), reverse=True)
+        logger.info(f"Top result: {results[0].get('title', results[0].get('name', 'Unknown'))} (type: {results[0].get('media_type')})")
         return results[0]
     
+    # If no results with exact year, try without year
+    if year and not results:
+        logger.info(f"No results with year {year}, trying without year parameter")
+        params.pop("year", None)
+        
+        # Try again for movies
+        movie_results = call_tmdb_api("search/movie", params)
+        if movie_results and "results" in movie_results and movie_results["results"]:
+            for movie in movie_results["results"][:1]:
+                movie["media_type"] = "movie"
+                logger.info(f"Found movie without year filter: {movie.get('title', 'Unknown')}")
+                return movie
+        
+        # Try again for TV
+        tv_results = call_tmdb_api("search/tv", params)
+        if tv_results and "results" in tv_results and tv_results["results"]:
+            for show in tv_results["results"][:1]:
+                show["media_type"] = "tv"
+                logger.info(f"Found TV show without year filter: {show.get('name', 'Unknown')}")
+                return show
+    
+    logger.warning(f"No results found for '{title}'")
     return None
 
 # Function to get movie/show details with AI description
@@ -534,6 +781,7 @@ def main():
     # Initialize session state variables
     if 'step' not in st.session_state:
         st.session_state.step = 'intro'
+        logger.info("Initializing app with 'intro' step")
     if 'persona' not in st.session_state:
         st.session_state.persona = None
     if 'questions' not in st.session_state:
@@ -548,6 +796,19 @@ def main():
         st.session_state.media_details = []
     if 'load_more_count' not in st.session_state:
         st.session_state.load_more_count = 0
+    if 'debug_mode' not in st.session_state:
+        st.session_state.debug_mode = False
+        
+    # Log current app state at startup
+    logger.info(f"Current app state: {st.session_state.step}")
+    
+    # Check for API keys
+    if not TMDB_API_KEY:
+        logger.warning("TMDB API key not found in secrets.toml")
+        st.sidebar.warning("⚠️ TMDB API key missing. Add it to .streamlit/secrets.toml")
+    if not GEMINI_API_KEY:
+        logger.warning("Gemini API key not found in secrets.toml")
+        st.sidebar.warning("⚠️ Gemini API key missing. Add it to .streamlit/secrets.toml")
     
     # Load custom CSS
     load_custom_css()
@@ -563,6 +824,33 @@ def main():
     with col2:
         st.markdown('<p>Movie data from TMDB</p>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Debug mode toggle in sidebar
+    with st.sidebar:
+        st.markdown("### Developer Tools")
+        debug_toggle = st.checkbox("Enable Debug Mode", value=st.session_state.debug_mode)
+        
+        if debug_toggle != st.session_state.debug_mode:
+            st.session_state.debug_mode = debug_toggle
+            st.rerun()
+            
+        if st.session_state.debug_mode:
+            st.markdown("### Debug Information")
+            st.markdown(f"**Current State:** {st.session_state.step}")
+            st.markdown(f"**Selected Persona:** {st.session_state.persona}")
+            st.markdown(f"**Questions Count:** {len(st.session_state.questions)}")
+            st.markdown(f"**Current Question:** {st.session_state.current_question}")
+            st.markdown(f"**Answers Count:** {len(st.session_state.answers)}")
+            st.markdown(f"**Recommendations Count:** {len(st.session_state.recommendations)}")
+            st.markdown(f"**Media Details Count:** {len(st.session_state.media_details)}")
+            st.markdown(f"**Log File:** {log_filename}")
+            
+            if st.button("View Session State"):
+                st.json(st.session_state)
+                
+            if st.button("Reset Application"):
+                st.session_state.clear()
+                st.rerun()
     
     # Introduction screen
     if st.session_state.step == 'intro':
@@ -653,29 +941,93 @@ def main():
         st.markdown('<div class="loading-animation"></div>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
         
-        # Get recommendations
-        recommendations = get_recommendations(st.session_state.answers, st.session_state.persona)
-        st.session_state.recommendations = recommendations
-        
-        # Get details for each recommendation
-        media_details = []
-        for rec in recommendations:
-            title = rec.get("title", "")
-            year = rec.get("year", "")
-            reason = rec.get("reason", "")
+        try:
+            # Log the current state
+            logger.info(f"Getting recommendations for {st.session_state.persona}")
+            logger.info(f"User answers: {json.dumps(st.session_state.answers)}")
             
-            # Search for the movie/show in TMDB
-            result = search_tmdb(title, year)
+            # Get recommendations
+            recommendations = get_recommendations(st.session_state.answers, st.session_state.persona)
+            logger.info(f"Received {len(recommendations)} recommendations")
             
-            # Get detailed information
-            if result:
+            # Store recommendations in session state
+            st.session_state.recommendations = recommendations
+            
+            # Display status for debugging
+            status_container = st.empty()
+            
+            # Get details for each recommendation
+            media_details = []
+            for idx, rec in enumerate(recommendations):
+                title = rec.get("title", "")
+                year = rec.get("year", "")
+                reason = rec.get("reason", "")
+                
+                # Show processing status
+                status_container.info(f"Processing recommendation {idx+1}/{len(recommendations)}: {title} ({year})")
+                logger.info(f"Searching for: {title} ({year})")
+                
+                # Search for the movie/show in TMDB
+                result = search_tmdb(title, year)
+                
+                # Log search result
+                if result:
+                    logger.info(f"Found match for '{title}' in TMDB: {result.get('id')}")
+                else:
+                    logger.warning(f"No match found for '{title}' in TMDB")
+                    continue
+                
+                # Get detailed information
                 details = get_media_details(result, reason)
                 if details:
+                    logger.info(f"Successfully got details for '{title}'")
                     media_details.append(details)
-        
-        st.session_state.media_details = media_details
-        st.session_state.step = 'recommendations'
-        st.rerun()
+                else:
+                    logger.warning(f"Failed to get details for '{title}'")
+            
+            # Clear the status
+            status_container.empty()
+            
+            logger.info(f"Processed {len(media_details)} media details")
+            
+            # Store in session state
+            st.session_state.media_details = media_details
+            
+            # If no recommendations found, add debugging info
+            if not media_details:
+                logger.error("No media details found for any recommendations")
+                if not recommendations:
+                    logger.error("No recommendations returned from AI")
+                else:
+                    logger.error(f"Recommendations were generated but no TMDB matches found: {json.dumps(recommendations)}")
+                
+                # Add fallback recommendation
+                fallback = {
+                    "title": "The Matrix",
+                    "year": "1999",
+                    "poster_url": DEFAULT_IMAGE_URL,
+                    "overview": "A computer hacker learns from mysterious rebels about the true nature of his reality and his role in the war against its controllers.",
+                    "genres": "Action, Science Fiction",
+                    "ai_description": "This mind-bending sci-fi action film revolutionized visual effects with its 'bullet time' sequences. It combines philosophical themes with stunning action for a perfect movie night experience.",
+                    "media_type": "movie",
+                    "reason": "A universally acclaimed film that appeals to most viewers"
+                }
+                
+                media_details.append(fallback)
+                st.session_state.media_details = media_details
+                logger.info("Added fallback recommendation")
+            
+            # Move to recommendations screen
+            st.session_state.step = 'recommendations'
+            st.rerun()
+            
+        except Exception as e:
+            error_msg = f"Error in recommendation processing: {e}"
+            logger.error(error_msg)
+            st.error(error_msg)
+            # Add a fallback recommendation
+            st.session_state.step = 'recommendations'
+            st.rerun()
     
     # Recommendations screen
     elif st.session_state.step == 'recommendations':
