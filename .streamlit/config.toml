@@ -1,6 +1,14 @@
 [theme]
-primaryColor = "#00FF00"          # Neon green for buttons and highlights
-backgroundColor = "#000000"       # Black background
-secondaryBackgroundColor = "#1A1A1A"  # Dark gray for secondary elements
-textColor = "#FFFFFF"             # White text
-font = "monospace"                # Base font (overridden by CSS for Orbitron)
+primaryColor = "#39FF14"
+backgroundColor = "#0F0F23"
+secondaryBackgroundColor = "#2D142C"
+textColor = "#FFFFFF"
+font = "monospace"
+
+[server]
+enableXsrfProtection = true
+enableCORS = false
+enableWebsocketCompression = true
+
+[browser]
+gatherUsageStats = false
